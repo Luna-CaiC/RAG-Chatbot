@@ -5,6 +5,7 @@ Handles PDF upload → text extraction → chunking → embedding → vector sto
 """
 
 import os
+import time
 import tempfile
 import logging
 
@@ -16,8 +17,10 @@ from langchain_community.vectorstores import Chroma
 # ── Constants ────────────────────────────────────────────────────────
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
-EMBEDDING_MODEL = "models/embedding-001"
+EMBEDDING_MODEL = "models/gemini-embedding-001"
 CHROMA_PERSIST_DIR = "chroma_db"
+BATCH_SIZE = 50          # chunks per API call (free tier: 100 req/min)
+BATCH_DELAY_SEC = 2      # seconds to wait between batches
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +33,7 @@ def process_document(uploaded_file) -> Chroma:
         1. Save the uploaded file temporarily to disk.
         2. Load the PDF with PyPDFLoader.
         3. Split the text into chunks.
-        4. Generate embeddings with Google Generative AI.
+        4. Generate embeddings with Google Generative AI (in batches).
         5. Store vectors in a local Chroma vector store.
 
     Args:
@@ -88,12 +91,25 @@ def process_document(uploaded_file) -> Chroma:
         # ── 4. Create embeddings ─────────────────────────────────────
         embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
 
-        # ── 5. Build Chroma vector store ─────────────────────────────
+        # ── 5. Build Chroma vector store (in batches) ────────────────
+        #    Process the first batch to create the store, then add
+        #    remaining batches to avoid exceeding the API rate limit.
+        first_batch = chunks[:BATCH_SIZE]
         vector_store = Chroma.from_documents(
-            documents=chunks,
+            documents=first_batch,
             embedding=embeddings,
             persist_directory=CHROMA_PERSIST_DIR,
         )
+
+        # Add remaining chunks in batches with delays
+        for i in range(BATCH_SIZE, len(chunks), BATCH_SIZE):
+            batch = chunks[i : i + BATCH_SIZE]
+            logger.info(
+                "Embedding batch %d–%d of %d ...",
+                i + 1, min(i + BATCH_SIZE, len(chunks)), len(chunks),
+            )
+            time.sleep(BATCH_DELAY_SEC)  # respect rate limit
+            vector_store.add_documents(batch)
 
         logger.info(
             "Vector store created with %d vectors in '%s'.",
