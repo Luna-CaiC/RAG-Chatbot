@@ -5,6 +5,7 @@ Handles PDF upload → text extraction → chunking → embedding → vector sto
 """
 
 import os
+import shutil
 import time
 import tempfile
 import logging
@@ -19,10 +20,31 @@ CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 CHROMA_PERSIST_DIR = "chroma_db"
-BATCH_SIZE = 50          # chunks per API call (free tier: 100 req/min)
-BATCH_DELAY_SEC = 2      # seconds to wait between batches
+BATCH_SIZE = 20          # chunks per batch (conservative for free tier)
+BATCH_DELAY_SEC = 5      # seconds between batches
+MAX_RETRIES = 5          # max retries on rate-limit errors
+INITIAL_RETRY_DELAY = 15 # initial retry wait in seconds
 
 logger = logging.getLogger(__name__)
+
+
+def _embed_batch_with_retry(vector_store, batch, batch_num, total):
+    """Embed a batch of documents with exponential backoff on 429 errors."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            vector_store.add_documents(batch)
+            return
+        except Exception as exc:
+            if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                wait = INITIAL_RETRY_DELAY * (2 ** attempt)
+                logger.warning(
+                    "Rate limited on batch %d. Retrying in %ds (attempt %d/%d)...",
+                    batch_num, wait, attempt + 1, MAX_RETRIES,
+                )
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError(f"Batch {batch_num}/{total} failed after {MAX_RETRIES} retries.")
 
 
 def process_document(uploaded_file) -> Chroma:
@@ -91,25 +113,46 @@ def process_document(uploaded_file) -> Chroma:
         # ── 4. Create embeddings ─────────────────────────────────────
         embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
 
-        # ── 5. Build Chroma vector store (in batches) ────────────────
-        #    Process the first batch to create the store, then add
-        #    remaining batches to avoid exceeding the API rate limit.
-        first_batch = chunks[:BATCH_SIZE]
-        vector_store = Chroma.from_documents(
-            documents=first_batch,
-            embedding=embeddings,
-            persist_directory=CHROMA_PERSIST_DIR,
-        )
+        # ── 5. Build Chroma vector store (in small batches) ──────────
+        #    Clean any stale chroma_db first to avoid readonly errors.
+        if os.path.exists(CHROMA_PERSIST_DIR):
+            shutil.rmtree(CHROMA_PERSIST_DIR)
 
-        # Add remaining chunks in batches with delays
+        total_batches = (len(chunks) + BATCH_SIZE - 1) // BATCH_SIZE
+
+        # First batch — creates the store
+        first_batch = chunks[:BATCH_SIZE]
+        for attempt in range(MAX_RETRIES):
+            try:
+                vector_store = Chroma.from_documents(
+                    documents=first_batch,
+                    embedding=embeddings,
+                    persist_directory=CHROMA_PERSIST_DIR,
+                )
+                break
+            except Exception as exc:
+                if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                    wait = INITIAL_RETRY_DELAY * (2 ** attempt)
+                    logger.warning(
+                        "Rate limited on first batch. Retrying in %ds (attempt %d/%d)...",
+                        wait, attempt + 1, MAX_RETRIES,
+                    )
+                    time.sleep(wait)
+                else:
+                    raise
+        else:
+            raise RuntimeError("First batch failed after max retries.")
+
+        logger.info("Batch 1/%d embedded.", total_batches)
+
+        # Remaining batches
         for i in range(BATCH_SIZE, len(chunks), BATCH_SIZE):
             batch = chunks[i : i + BATCH_SIZE]
-            logger.info(
-                "Embedding batch %d–%d of %d ...",
-                i + 1, min(i + BATCH_SIZE, len(chunks)), len(chunks),
-            )
+            batch_num = (i // BATCH_SIZE) + 1
+
             time.sleep(BATCH_DELAY_SEC)  # respect rate limit
-            vector_store.add_documents(batch)
+            _embed_batch_with_retry(vector_store, batch, batch_num, total_batches)
+            logger.info("Batch %d/%d embedded.", batch_num, total_batches)
 
         logger.info(
             "Vector store created with %d vectors in '%s'.",
