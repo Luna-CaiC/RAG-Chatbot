@@ -22,26 +22,25 @@ EMBEDDING_MODEL = "models/gemini-embedding-001"
 CHROMA_PERSIST_DIR = "chroma_db"
 BATCH_SIZE = 10          # chunks per batch (~75 req/min, under 100/min limit)
 BATCH_DELAY_SEC = 8      # seconds between batches
-MAX_RETRIES = 8          # max retries on rate-limit errors
-INITIAL_RETRY_DELAY = 60 # initial retry wait in seconds (full quota reset)
+MAX_RETRIES = 10         # max retries on rate-limit errors
+RETRY_DELAY_SEC = 65     # fixed retry wait (quota resets every 60s)
 
 logger = logging.getLogger(__name__)
 
 
 def _embed_batch_with_retry(vector_store, batch, batch_num, total):
-    """Embed a batch of documents with exponential backoff on 429 errors."""
+    """Embed a batch of documents, retrying on 429 rate-limit errors."""
     for attempt in range(MAX_RETRIES):
         try:
             vector_store.add_documents(batch)
             return
         except Exception as exc:
             if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
-                wait = INITIAL_RETRY_DELAY * (2 ** attempt)
                 logger.warning(
-                    "Rate limited on batch %d. Retrying in %ds (attempt %d/%d)...",
-                    batch_num, wait, attempt + 1, MAX_RETRIES,
+                    "Rate limited on batch %d. Waiting %ds for quota reset (attempt %d/%d)...",
+                    batch_num, RETRY_DELAY_SEC, attempt + 1, MAX_RETRIES,
                 )
-                time.sleep(wait)
+                time.sleep(RETRY_DELAY_SEC)
             else:
                 raise
     raise RuntimeError(f"Batch {batch_num}/{total} failed after {MAX_RETRIES} retries.")
@@ -132,12 +131,11 @@ def process_document(uploaded_file) -> Chroma:
                 break
             except Exception as exc:
                 if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
-                    wait = INITIAL_RETRY_DELAY * (2 ** attempt)
                     logger.warning(
-                        "Rate limited on first batch. Retrying in %ds (attempt %d/%d)...",
-                        wait, attempt + 1, MAX_RETRIES,
+                        "Rate limited on first batch. Waiting %ds for quota reset (attempt %d/%d)...",
+                        RETRY_DELAY_SEC, attempt + 1, MAX_RETRIES,
                     )
-                    time.sleep(wait)
+                    time.sleep(RETRY_DELAY_SEC)
                 else:
                     raise
         else:
