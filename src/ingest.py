@@ -20,10 +20,10 @@ CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 CHROMA_PERSIST_DIR = "chroma_db"
-BATCH_SIZE = 20          # chunks per batch (conservative for free tier)
-BATCH_DELAY_SEC = 5      # seconds between batches
-MAX_RETRIES = 5          # max retries on rate-limit errors
-INITIAL_RETRY_DELAY = 15 # initial retry wait in seconds
+BATCH_SIZE = 10          # chunks per batch (~75 req/min, under 100/min limit)
+BATCH_DELAY_SEC = 8      # seconds between batches
+MAX_RETRIES = 8          # max retries on rate-limit errors
+INITIAL_RETRY_DELAY = 60 # initial retry wait in seconds (full quota reset)
 
 logger = logging.getLogger(__name__)
 
