@@ -19,7 +19,6 @@ from langchain_community.vectorstores import Chroma
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"   # runs locally, no API calls
-CHROMA_PERSIST_DIR = "chroma_db"
 
 logger = logging.getLogger(__name__)
 
@@ -90,21 +89,17 @@ def process_document(uploaded_file) -> Chroma:
         # ── 4. Create embeddings (local — no API calls) ──────────────
         embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
-        # ── 5. Build Chroma vector store ─────────────────────────────
-        #    Clean any stale chroma_db first to avoid readonly errors.
-        if os.path.exists(CHROMA_PERSIST_DIR):
-            shutil.rmtree(CHROMA_PERSIST_DIR)
-
+        # ── 5. Build Chroma vector store (In-Memory) ─────────────────
+        #    Using an in-memory store avoids SQLite file-locking issues
+        #    (e.g., "readonly database") when users re-upload documents.
         vector_store = Chroma.from_documents(
             documents=chunks,
             embedding=embeddings,
-            persist_directory=CHROMA_PERSIST_DIR,
         )
 
         logger.info(
-            "Vector store created with %d vectors in '%s'.",
-            len(chunks),
-            CHROMA_PERSIST_DIR,
+            "Vector store created in-memory with %d vectors.",
+            len(chunks)
         )
 
         return vector_store
