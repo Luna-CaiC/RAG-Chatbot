@@ -40,18 +40,21 @@ with st.sidebar:
     )
 
     if uploaded_file is not None:
-        # Only process if we haven't already processed this file
-        if (
-            "last_uploaded_file" not in st.session_state
-            or st.session_state.last_uploaded_file != uploaded_file.name
-        ):
+        # Detect file change using Streamlit's unique file_id
+        current_file_id = uploaded_file.file_id
+        previous_file_id = st.session_state.get("last_file_id", None)
+
+        if current_file_id != previous_file_id:
             with st.spinner("Processing document..."):
                 try:
+                    # Explicitly discard the old vector store
+                    st.session_state.vector_store = None
+                    st.session_state.chat_history = []
+
                     vector_store = process_document(uploaded_file)
                     st.session_state.vector_store = vector_store
+                    st.session_state.last_file_id = current_file_id
                     st.session_state.last_uploaded_file = uploaded_file.name
-                    # Clear chat history for the new document
-                    st.session_state.chat_history = []
                     st.success(f"✅ *{uploaded_file.name}* processed successfully!")
                 except Exception as e:
                     st.error(f"❌ Error processing document: {e}")
