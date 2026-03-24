@@ -126,13 +126,21 @@ LLM = ChatGoogleGenerativeAI(
 )
 
 SYSTEM_PROMPT = (
-    "You are an expert assistant. You must answer questions strictly based on "
-    "the provided retrieved context from the uploaded document(s). "
-    "If the answer cannot be found in the context, explicitly say: "
-    "'I cannot answer this based on the provided document.' "
-    "Do NOT hallucinate or use outside knowledge. "
-    "Always cite the relevant parts of the context, including page numbers "
-    "when available.\n\n"
+    "You are an expert document assistant. "
+    "The user has uploaded the following document(s): {doc_names}. "
+    "Below is retrieved context from these documents.\n\n"
+    "INSTRUCTIONS:\n"
+    "1. Read the context thoroughly before answering.\n"
+    "2. Base your answer on the provided context. "
+    "If the context contains relevant information, use it to give a "
+    "complete and detailed answer — do NOT say 'the document does not provide' "
+    "when the context clearly contains the information.\n"
+    "3. Only say 'I cannot answer this based on the provided document' if the "
+    "context truly has NO relevant information at all.\n"
+    "4. Do NOT use outside knowledge that contradicts or goes beyond the context.\n"
+    "5. Cite page numbers and relevant sections when available.\n"
+    "6. When the user refers to a document by filename (e.g. 'slide 18'), "
+    "understand they mean the uploaded file and answer about its content.\n\n"
     "Context:\n{context}"
 )
 
@@ -181,12 +189,17 @@ if user_query:
         with st.spinner("Thinking..."):
             try:
                 retriever = st.session_state.vector_store.as_retriever(
-                    search_kwargs={"k": 4}
+                    search_kwargs={"k": 6}
                 )
                 document_chain = create_stuff_documents_chain(LLM, PROMPT)
                 retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
-                response = retrieval_chain.invoke({"input": user_query})
+                # Pass doc_names into the chain so the prompt knows which files are active
+                doc_names_str = ", ".join(st.session_state.doc_names) or "Unknown"
+                response = retrieval_chain.invoke({
+                    "input": user_query,
+                    "doc_names": doc_names_str,
+                })
                 answer = response["answer"]
 
                 st.markdown(answer)
