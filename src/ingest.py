@@ -150,6 +150,10 @@ def process_documents(uploaded_files: list) -> Chroma:
             loader = PyPDFLoader(tmp_path)
             pages = loader.load()
 
+            # Restore original filename in metadata (PyPDFLoader sets it to the tmp_path)
+            for page in pages:
+                page.metadata["source"] = uploaded_file.name
+
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=CHUNK_SIZE,
                 chunk_overlap=CHUNK_OVERLAP,

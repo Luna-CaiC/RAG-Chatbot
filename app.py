@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 
 from src.ingest import process_documents
 from src.history import ChatHistoryManager
@@ -189,9 +189,16 @@ if user_query:
         with st.spinner("Thinking..."):
             try:
                 retriever = st.session_state.vector_store.as_retriever(
-                    search_kwargs={"k": 6}
+                    search_kwargs={"k": 15}
                 )
-                document_chain = create_stuff_documents_chain(LLM, PROMPT)
+
+                # Format each chunk so the LLM explicitly sees the source filename
+                document_prompt = PromptTemplate.from_template(
+                    "Source: {source}\nContent: {page_content}"
+                )
+                document_chain = create_stuff_documents_chain(
+                    LLM, PROMPT, document_prompt=document_prompt
+                )
                 retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
                 # Pass doc_names into the chain so the prompt knows which files are active
