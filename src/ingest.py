@@ -150,9 +150,11 @@ def process_documents(uploaded_files: list) -> Chroma:
             loader = PyPDFLoader(tmp_path)
             pages = loader.load()
 
-            # Restore original filename in metadata (PyPDFLoader sets it to the tmp_path)
+            # Restore original filename in metadata AND inject it into the text
+            # so the dense vector search can actually match the filename!
             for page in pages:
                 page.metadata["source"] = uploaded_file.name
+                page.page_content = f"[Source Document: {uploaded_file.name}]\n{page.page_content}"
 
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=CHUNK_SIZE,

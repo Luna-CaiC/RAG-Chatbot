@@ -1,5 +1,23 @@
 [
   {
+    "id": "f3696829",
+    "timestamp": "2026-03-24T01:26:18.384140",
+    "documents": [
+      "Postgresql_Tutorial.pdf",
+      "slide 18.pdf"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "\"请总结 slide 18这个文件里的内容。how to create a table using postgresql?\""
+      },
+      {
+        "role": "assistant",
+        "content": "根据提供的文档内容：\n\n1.  **关于 \"slide 18.pdf\" 的总结：**\n    提供的上下文没有包含名为 \"slide 18.pdf\" 的文件内容，因此我无法总结其内容。\n\n2.  **如何在 PostgreSQL 中创建表 (how to create a table using postgresql)：**\n    在 PostgreSQL 中，可以使用 `CREATE TABLE` 语句来创建新表。\n\n    **基本语法如下：**\n    ```sql\n    CREATE TABLE table_name(\n       column1 datatype,\n       column2 datatype,\n       column3 datatype,\n       .....\n       columnN datatype,\n       PRIMARY KEY( one or more columns )\n    );\n    ```\n    *   `CREATE TABLE` 是一个关键字，用于告诉数据库系统创建一个新表。\n    *   `table_name` 是表的唯一名称或标识符。\n    *   括号内定义了表中的每个列及其数据类型。\n    *   `PRIMARY KEY` 用于指定一个或多个列作为主键。\n\n    **示例：**\n    以下示例创建了一个名为 `COMPANY` 的表，其中 `ID` 作为主键，并且 `ID`、`NAME`、`AGE` 字段被设置为 `NOT NULL`，表示这些字段在创建记录时不能为空。\n\n    ```sql\n    CREATE TABLE COMPANY(\n       ID   INT              NOT NULL,\n       NAME VARCHAR (20)     NOT NULL,\n       AGE  INT              NOT NULL,\n       ADDRESS  CHAR (25) ,\n       SALARY   DECIMAL (18, 2),\n       PRIMARY KEY (ID)\n    );\n    ```\n    (来源: Postgresql_Tutorial.pdf, 第 53 页)\n\n    **在特定 Schema 中创建表的示例：**\n    如果你想在一个特定的 schema 中创建表，语法如下：\n    ```sql\n    create table myschema.company(\n       ID   INT              NOT NULL,\n       NAME VARCHAR (20)     NOT NULL,\n       AGE  INT              NOT NULL,\n       ADDRESS  CHAR (25) ,\n       SALARY   DECIMAL (18, 2),\n       PRIMARY KEY (ID)\n    );\n    ```\n    (来源: Postgresql_Tutorial.pdf, 章节 \"10. PostgreSQL – Schema\")\n\n    **通过 PHP 接口创建表的示例：**\n    文档还提供了一个 PHP 程序示例，用于连接 PostgreSQL 数据库并执行 `CREATE TABLE` 语句来创建 `COMPANY` 表：\n    ```php\n    <?php\n       $host        = \"host=127.0.0.1\";\n       $port        = \"port=5432\";\n       $dbname      = \"dbname=testdb\";\n       $credentials = \"user=postgres password=pass123\";\n\n       $db = pg_connect( \"$host $port $dbname $credentials\"  );\n       if(!$db){\n          echo \"Error : Unable to open database\\n\";\n       } else {\n          echo \"Opened database successfully\\n\";\n       }\n          $sql =<<<EOF\n          CREATE TABLE COMPANY\n          (ID INT PRIMARY KEY     NOT NULL,\n          NAME           TEXT    NOT NULL,\n          AGE            INT     NOT NULL,\n          ADDRESS        CHAR(50),\n          SALARY         REAL);\n    EOF;\n       $ret = pg_query($db, $sql);\n       if(!$ret){\n          echo pg_last_error($db);\n       } else {\n          echo \"Table created successfully\\n\";\n       }\n       pg_close($db);\n    ?>\n    ```\n    (来源: Postgresql_Tutorial.pdf, 第 225 页)"
+      }
+    ]
+  },
+  {
     "id": "15a87eaf",
     "timestamp": "2026-03-24T01:21:17.369881",
     "documents": [
