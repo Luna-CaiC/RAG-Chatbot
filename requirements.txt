@@ -6,3 +6,5 @@ chromadb
 pypdf
 python-dotenv
 sentence-transformers
+pymupdf
+Pillow

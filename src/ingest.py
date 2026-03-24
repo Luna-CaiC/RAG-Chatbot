@@ -6,14 +6,17 @@ Uses a local HuggingFace embedding model (no API rate limits).
 """
 
 import os
-import shutil
-import tempfile
 import logging
+import tempfile
+import fitz
+import base64
 
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
 
 # ── Constants ────────────────────────────────────────────────────────
 CHUNK_SIZE = 1000
@@ -21,102 +24,6 @@ CHUNK_OVERLAP = 200
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"   # runs locally, no API calls
 
 logger = logging.getLogger(__name__)
-
-
-def process_document(uploaded_file) -> Chroma:
-    """
-    Process an uploaded PDF file and return a Chroma vector store.
-
-    Steps:
-        1. Save the uploaded file temporarily to disk.
-        2. Load the PDF with PyPDFLoader.
-        3. Split the text into chunks.
-        4. Generate embeddings locally with HuggingFace.
-        5. Store vectors in a local Chroma vector store.
-
-    Args:
-        uploaded_file: A Streamlit UploadedFile object (has .name and .read()).
-
-    Returns:
-        Chroma: A Chroma vector store populated with the document embeddings.
-
-    Raises:
-        ValueError: If the uploaded file is None or empty.
-        RuntimeError: If any step in the pipeline fails.
-    """
-
-    # ── 0. Validate input ────────────────────────────────────────────
-    if uploaded_file is None:
-        raise ValueError("No file was uploaded.")
-
-    file_bytes = uploaded_file.read()
-    if not file_bytes:
-        raise ValueError("The uploaded file is empty.")
-
-    logger.info("Processing document: %s", uploaded_file.name)
-
-    try:
-        # ── 1. Save to a temporary file ──────────────────────────────
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=".pdf"
-        ) as tmp_file:
-            tmp_file.write(file_bytes)
-            tmp_path = tmp_file.name
-
-        logger.info("Saved temp file: %s", tmp_path)
-
-        # ── 2. Load PDF pages ────────────────────────────────────────
-        loader = PyPDFLoader(tmp_path)
-        pages = loader.load()
-
-        if not pages:
-            raise RuntimeError("PyPDFLoader returned no pages. Is the PDF valid?")
-
-        logger.info("Loaded %d page(s) from PDF.", len(pages))
-
-        # ── 3. Split into chunks ─────────────────────────────────────
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=CHUNK_SIZE,
-            chunk_overlap=CHUNK_OVERLAP,
-        )
-        chunks = text_splitter.split_documents(pages)
-
-        if not chunks:
-            raise RuntimeError("Text splitting produced no chunks.")
-
-        logger.info("Split into %d chunk(s).", len(chunks))
-
-        # ── 4. Create embeddings (local — no API calls) ──────────────
-        embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-
-        # ── 5. Build Chroma vector store (In-Memory) ─────────────────
-        #    Using an in-memory store avoids SQLite file-locking issues
-        #    (e.g., "readonly database") when users re-upload documents.
-        vector_store = Chroma.from_documents(
-            documents=chunks,
-            embedding=embeddings,
-        )
-
-        logger.info(
-            "Vector store created in-memory with %d vectors.",
-            len(chunks)
-        )
-
-        return vector_store
-
-    except (ValueError, RuntimeError):
-        raise
-
-    except Exception as exc:
-        raise RuntimeError(
-            f"Document processing failed: {exc}"
-        ) from exc
-
-    finally:
-        # ── Cleanup temp file ────────────────────────────────────────
-        if "tmp_path" in locals() and os.path.exists(tmp_path):
-            os.remove(tmp_path)
-            logger.debug("Removed temp file: %s", tmp_path)
 
 
 def process_documents(uploaded_files: list) -> Chroma:
@@ -147,8 +54,41 @@ def process_documents(uploaded_files: list) -> Chroma:
                 tmp_file.write(file_bytes)
                 tmp_path = tmp_file.name
 
-            loader = PyPDFLoader(tmp_path)
+            # Switch from PyPDFLoader to PyMuPDFLoader for better parsing
+            loader = PyMuPDFLoader(tmp_path)
             pages = loader.load()
+
+            # ── Multimodal OCR Fallback ────────────────────────────────
+            # If a page is just an image (like exported PPT slides), PyMuPDF 
+            # won't find text. We render those pages to PNG and ask Gemini to OCR.
+            ocr_llm = None
+            pdf_doc = fitz.open(tmp_path)
+            
+            for i, page in enumerate(pages):
+                # If page has very little text, assume it's image-based
+                if len(page.page_content.strip()) <= 50:
+                    if ocr_llm is None:
+                        ocr_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
+                        logger.info("Initializing Gemini OCR fallback for image-based pages...")
+                    
+                    try:
+                        # Render physical PDF page to image
+                        pix = pdf_doc[i].get_pixmap(dpi=150)
+                        img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+                        
+                        msg = HumanMessage(content=[
+                            {"type": "text", "text": "Extract all text from this slide verbatim. Summarize charts if any."},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                        ])
+                        
+                        ocr_text = ocr_llm.invoke([msg]).content
+                        page.page_content += f"\n{ocr_text}"
+                        logger.info(f"Successfully OCR'd page {i+1} of {uploaded_file.name}")
+                    except Exception as e:
+                        logger.warning(f"OCR failed for {uploaded_file.name} page {i+1}: {e}")
+            
+            pdf_doc.close()
+            # ───────────────────────────────────────────────────────────
 
             # Restore original filename in metadata AND inject it into the text
             # so the dense vector search can actually match the filename!
