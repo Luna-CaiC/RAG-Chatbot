@@ -12,6 +12,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
+from langchain_core.output_parsers import CommaSeparatedListOutputParser
 
 from src.ingest import process_documents
 from src.history import ChatHistoryManager
@@ -189,8 +190,28 @@ if user_query:
         with st.spinner("Thinking..."):
             try:
                 retriever = st.session_state.vector_store.as_retriever(
-                    search_kwargs={"k": 15}
+                    search_kwargs={"k": 8}
                 )
+
+                # ── Advanced RAG: Query Decomposition ──────────────────────
+                # Break complex user queries into simpler sub-queries to ensure all 
+                # parts of a compound question (e.g., across multiple docs) are retrieved.
+                decomp_prompt = PromptTemplate(
+                    template="Break this complex query into up to 3 concise, distinct search queries for a vector database. Return them ONLY as a comma-separated list.\nQuery: {query}",
+                    input_variables=["query"]
+                )
+                decomp_chain = decomp_prompt | LLM | CommaSeparatedListOutputParser()
+                sub_queries = decomp_chain.invoke({"query": user_query})
+                # Always safely include the original query
+                all_queries = [user_query] + sub_queries
+
+                # Gather and deduplicate documents from all queries
+                all_docs = []
+                for q in all_queries:
+                    all_docs.extend(retriever.invoke(q))
+                
+                unique_docs = list({doc.page_content: doc for doc in all_docs}.values())
+                # ───────────────────────────────────────────────────────────
 
                 # Format each chunk so the LLM explicitly sees the source filename
                 document_prompt = PromptTemplate.from_template(
@@ -199,15 +220,17 @@ if user_query:
                 document_chain = create_stuff_documents_chain(
                     LLM, PROMPT, document_prompt=document_prompt
                 )
-                retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
                 # Pass doc_names into the chain so the prompt knows which files are active
                 doc_names_str = ", ".join(st.session_state.doc_names) or "Unknown"
-                response = retrieval_chain.invoke({
+                
+                # Execute the chain directly with our globally retrieved unique docs
+                response = document_chain.invoke({
                     "input": user_query,
                     "doc_names": doc_names_str,
+                    "context": unique_docs,
                 })
-                answer = response["answer"]
+                answer = response
 
                 st.markdown(answer)
                 st.session_state.chat_history.append(
