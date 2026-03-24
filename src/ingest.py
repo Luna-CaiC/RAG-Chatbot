@@ -58,36 +58,53 @@ def process_documents(uploaded_files: list) -> Chroma:
             loader = PyMuPDFLoader(tmp_path)
             pages = loader.load()
 
-            # ── Multimodal OCR Fallback ────────────────────────────────
-            # If a page is just an image (like exported PPT slides), PyMuPDF 
-            # won't find text. We render those pages to PNG and ask Gemini to OCR.
-            ocr_llm = None
-            pdf_doc = fitz.open(tmp_path)
+            # ── Multimodal OCR Fallback (Batched for Rate Limits) ──────
+            # Only trigger OCR if the ENTIRE document seems to be image-based 
+            # (e.g. average < 50 chars per page). This prevents wasting API calls 
+            # on blank/diagram pages inside normal text PDFs.
+            total_text_len = sum(len(p.page_content.strip()) for p in pages)
+            avg_chars_per_page = total_text_len / max(1, len(pages))
             
-            for i, page in enumerate(pages):
-                # If page has very little text, assume it's image-based
-                if len(page.page_content.strip()) <= 50:
-                    if ocr_llm is None:
-                        ocr_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
-                        logger.info("Initializing Gemini OCR fallback for image-based pages...")
-                    
-                    try:
-                        # Render physical PDF page to image
-                        pix = pdf_doc[i].get_pixmap(dpi=150)
+            if avg_chars_per_page < 50:
+                logger.info("Document '%s' seems to be image-based (avg %d chars/page). Triggering OCR...", uploaded_file.name, avg_chars_per_page)
+                pdf_doc = fitz.open(tmp_path)
+                ocr_images = []
+                ocr_page_indices = []
+                
+                for i, page in enumerate(pages):
+                    # For image-based docs, OCR every page that has little text
+                    if len(page.page_content.strip()) <= 50:
+                        ocr_page_indices.append(i)
+                        pix = pdf_doc[i].get_pixmap(dpi=100)
                         img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+                        ocr_images.append({
+                            "type": "image_url", 
+                            "image_url": {"url": f"data:image/png;base64,{img_b64}"}
+                        })
+                
+                if ocr_images:
+                    ocr_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
+                    
+                    batch_size = 15
+                    for start_idx in range(0, len(ocr_images), batch_size):
+                        batch_imgs = ocr_images[start_idx:start_idx+batch_size]
+                        batch_indices = ocr_page_indices[start_idx:start_idx+batch_size]
                         
                         msg = HumanMessage(content=[
-                            {"type": "text", "text": "Extract all text from this slide verbatim. Summarize charts if any."},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
-                        ])
+                            {"type": "text", "text": "Extract all text from these slide images verbatim. Summarize charts if any. Prefix each slide's text with 'Slide: '."}
+                        ] + batch_imgs)
                         
-                        ocr_text = ocr_llm.invoke([msg]).content
-                        page.page_content += f"\n{ocr_text}"
-                        logger.info(f"Successfully OCR'd page {i+1} of {uploaded_file.name}")
-                    except Exception as e:
-                        logger.warning(f"OCR failed for {uploaded_file.name} page {i+1}: {e}")
-            
-            pdf_doc.close()
+                        try:
+                            ocr_text = ocr_llm.invoke([msg]).content
+                            first_page = pages[batch_indices[0]]
+                            first_page.page_content += f"\n\n[OCR Text from Slides]\n{ocr_text}"
+                            logger.info("Successfully OCR'd batch of %d pages for %s", len(batch_imgs), uploaded_file.name)
+                        except Exception as e:
+                            logger.warning("Batch OCR failed for %s: %e", uploaded_file.name, e)
+                
+                pdf_doc.close()
+            else:
+                logger.info("Document '%s' is a normal text PDF (avg %d chars/page). Skipping OCR.", uploaded_file.name, avg_chars_per_page)
             # ───────────────────────────────────────────────────────────
 
             # Restore original filename in metadata AND inject it into the text
