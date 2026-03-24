@@ -1,7 +1,8 @@
 """
 RAG Chatbot — Streamlit Application
 =====================================
-Upload a PDF → ask questions → get citation-backed answers from Gemini.
+Upload PDFs → ask questions → get citation-backed answers powered by
+local HuggingFace embeddings and Google Gemini.
 """
 
 import streamlit as st
@@ -12,55 +13,111 @@ from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 
-from src.ingest import process_document
+from src.ingest import process_documents
+from src.history import ChatHistoryManager
 
 # ── Load environment variables ───────────────────────────────────────
 load_dotenv()
 
 # ── Page configuration ───────────────────────────────────────────────
 st.set_page_config(
-    page_title="RAG Chatbot",
+    page_title="RAG Chatbot — AI Document Assistant",
     page_icon="🤖",
     layout="centered",
 )
+
+# ── Persistent history manager ───────────────────────────────────────
+history_mgr = ChatHistoryManager()
 
 # ── Session state defaults ───────────────────────────────────────────
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
+if "session_id" not in st.session_state:
+    st.session_state.session_id = None
+if "doc_names" not in st.session_state:
+    st.session_state.doc_names = []
+if "viewing_history" not in st.session_state:
+    st.session_state.viewing_history = False
 
-# ── Sidebar: PDF upload ─────────────────────────────────────────────
+# ── Sidebar ──────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("📄 Upload Document")
-    uploaded_file = st.file_uploader(
-        "Choose a PDF file",
+    # ── Upload section ───────────────────────────────────────────────
+    st.header("📄 Upload Documents")
+    uploaded_files = st.file_uploader(
+        "Choose one or more PDF files",
         type=["pdf"],
-        help="Upload a technical document or research paper to query.",
+        accept_multiple_files=True,
+        help="Upload technical documents or research papers to query.",
     )
 
-    if uploaded_file is not None:
-        # Detect file change using Streamlit's unique file_id
-        current_file_id = uploaded_file.file_id
-        previous_file_id = st.session_state.get("last_file_id", None)
+    if uploaded_files:
+        # Build a fingerprint from all file IDs to detect changes
+        current_ids = tuple(sorted(f.file_id for f in uploaded_files))
+        previous_ids = st.session_state.get("last_file_ids", None)
 
-        if current_file_id != previous_file_id:
-            with st.spinner("Processing document..."):
+        if current_ids != previous_ids:
+            with st.spinner("Processing documents..."):
                 try:
-                    # Explicitly discard the old vector store
+                    # Clear old state
                     st.session_state.vector_store = None
                     st.session_state.chat_history = []
+                    st.session_state.viewing_history = False
 
-                    vector_store = process_document(uploaded_file)
+                    vector_store = process_documents(uploaded_files)
+                    doc_names = [f.name for f in uploaded_files]
+
                     st.session_state.vector_store = vector_store
-                    st.session_state.last_file_id = current_file_id
-                    st.session_state.last_uploaded_file = uploaded_file.name
-                    st.success(f"✅ *{uploaded_file.name}* processed successfully!")
+                    st.session_state.last_file_ids = current_ids
+                    st.session_state.doc_names = doc_names
+
+                    # Create a new persistent session
+                    session_id = history_mgr.create_session(doc_names)
+                    st.session_state.session_id = session_id
+
+                    st.success(f"✅ {len(doc_names)} file(s) processed!")
                 except Exception as e:
-                    st.error(f"❌ Error processing document: {e}")
+                    st.error(f"❌ Error: {e}")
 
     if st.session_state.vector_store is not None:
-        st.info(f"📚 Active document: **{st.session_state.get('last_uploaded_file', 'N/A')}**")
+        names = ", ".join(st.session_state.doc_names)
+        st.info(f"📚 Active: **{names}**")
+
+    st.divider()
+
+    # ── Clear chat button ────────────────────────────────────────────
+    if st.button("🗑️ Clear Chat History", use_container_width=True):
+        st.session_state.chat_history = []
+        st.session_state.viewing_history = False
+        if st.session_state.session_id:
+            history_mgr.save_messages(st.session_state.session_id, [])
+        st.rerun()
+
+    st.divider()
+
+    # ── Past sessions ────────────────────────────────────────────────
+    st.header("📜 Past Sessions")
+    sessions = history_mgr.load_sessions()
+
+    if not sessions:
+        st.caption("No saved sessions yet.")
+    else:
+        for s in sessions[:10]:  # Show latest 10
+            docs_label = ", ".join(s["documents"]) or "Unknown"
+            ts = s["timestamp"][:16].replace("T", " ")  # "2026-03-24 00:37"
+            msg_count = s["message_count"]
+            label = f"📝 {docs_label} ({msg_count} msgs)\n{ts}"
+
+            if st.button(label, key=f"hist_{s['id']}", use_container_width=True):
+                full_session = history_mgr.get_session(s["id"])
+                if full_session:
+                    st.session_state.chat_history = full_session["messages"]
+                    st.session_state.doc_names = full_session["documents"]
+                    st.session_state.viewing_history = True
+                    st.session_state.vector_store = None  # Vectors not available
+                    st.session_state.session_id = s["id"]
+                    st.rerun()
 
 # ── LLM & chain setup ───────────────────────────────────────────────
 LLM = ChatGoogleGenerativeAI(
@@ -69,10 +126,13 @@ LLM = ChatGoogleGenerativeAI(
 )
 
 SYSTEM_PROMPT = (
-    "You are a helpful assistant that answers questions based on "
-    "the provided context from the uploaded document. "
-    "If the context does not contain the answer, say so honestly. "
-    "Always cite the relevant parts of the context.\n\n"
+    "You are an expert assistant. You must answer questions strictly based on "
+    "the provided retrieved context from the uploaded document(s). "
+    "If the answer cannot be found in the context, explicitly say: "
+    "'I cannot answer this based on the provided document.' "
+    "Do NOT hallucinate or use outside knowledge. "
+    "Always cite the relevant parts of the context, including page numbers "
+    "when available.\n\n"
     "Context:\n{context}"
 )
 
@@ -83,20 +143,34 @@ PROMPT = ChatPromptTemplate.from_messages([
 
 # ── Main chat interface ─────────────────────────────────────────────
 st.title("🤖 RAG Chatbot")
-st.caption("Upload a PDF in the sidebar, then ask questions about it.")
+st.markdown(
+    "**AI-powered document assistant** — Upload PDFs in the sidebar, "
+    "then ask questions. Answers are grounded in your documents with "
+    "source citations. _Powered by HuggingFace Embeddings & Google Gemini._"
+)
+
+# Show banner when viewing a past session
+if st.session_state.viewing_history:
+    st.warning(
+        "📜 Viewing a past session. To ask new questions, "
+        "upload the PDF(s) again in the sidebar."
+    )
 
 # Display existing chat history
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat input
+# Chat input — disabled when no vector store (including history-only mode)
 user_query = st.chat_input(
-    "Ask a question about your document...",
+    "Ask a question about your document(s)...",
     disabled=st.session_state.vector_store is None,
 )
 
 if user_query:
+    # Exit history-viewing mode when asking new questions
+    st.session_state.viewing_history = False
+
     # Show user message
     with st.chat_message("user"):
         st.markdown(user_query)
@@ -106,14 +180,12 @@ if user_query:
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
-                # Build the retrieval chain
                 retriever = st.session_state.vector_store.as_retriever(
                     search_kwargs={"k": 4}
                 )
                 document_chain = create_stuff_documents_chain(LLM, PROMPT)
                 retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
-                # Invoke the chain
                 response = retrieval_chain.invoke({"input": user_query})
                 answer = response["answer"]
 
@@ -127,3 +199,10 @@ if user_query:
                 st.session_state.chat_history.append(
                     {"role": "assistant", "content": error_msg}
                 )
+
+    # Auto-save conversation to persistent history
+    if st.session_state.session_id:
+        history_mgr.save_messages(
+            st.session_state.session_id,
+            st.session_state.chat_history,
+        )

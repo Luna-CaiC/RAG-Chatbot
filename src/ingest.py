@@ -117,3 +117,63 @@ def process_document(uploaded_file) -> Chroma:
         if "tmp_path" in locals() and os.path.exists(tmp_path):
             os.remove(tmp_path)
             logger.debug("Removed temp file: %s", tmp_path)
+
+
+def process_documents(uploaded_files: list) -> Chroma:
+    """
+    Process multiple uploaded PDF files into a single combined vector store.
+
+    Args:
+        uploaded_files: List of Streamlit UploadedFile objects.
+
+    Returns:
+        Chroma: A combined vector store with embeddings from all documents.
+    """
+    if not uploaded_files:
+        raise ValueError("No files were uploaded.")
+
+    all_chunks = []
+
+    for uploaded_file in uploaded_files:
+        file_bytes = uploaded_file.read()
+        if not file_bytes:
+            logger.warning("Skipping empty file: %s", uploaded_file.name)
+            continue
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                delete=False, suffix=".pdf"
+            ) as tmp_file:
+                tmp_file.write(file_bytes)
+                tmp_path = tmp_file.name
+
+            loader = PyPDFLoader(tmp_path)
+            pages = loader.load()
+
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=CHUNK_SIZE,
+                chunk_overlap=CHUNK_OVERLAP,
+            )
+            chunks = text_splitter.split_documents(pages)
+            all_chunks.extend(chunks)
+            logger.info("Loaded %d chunks from '%s'.", len(chunks), uploaded_file.name)
+
+        except Exception as exc:
+            logger.error("Failed to process '%s': %s", uploaded_file.name, exc)
+
+        finally:
+            if "tmp_path" in locals() and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    if not all_chunks:
+        raise RuntimeError("No text could be extracted from any of the uploaded files.")
+
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    vector_store = Chroma.from_documents(
+        documents=all_chunks,
+        embedding=embeddings,
+    )
+
+    logger.info("Combined vector store created with %d vectors from %d file(s).",
+                len(all_chunks), len(uploaded_files))
+    return vector_store
