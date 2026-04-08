@@ -11,6 +11,7 @@ import tempfile
 import fitz
 import base64
 
+from dotenv import load_dotenv
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -18,10 +19,13 @@ from langchain_community.vectorstores import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 
+load_dotenv()
+
 # ── Constants ────────────────────────────────────────────────────────
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"   # runs locally, no API calls
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +87,7 @@ def process_documents(uploaded_files: list) -> Chroma:
                         })
                 
                 if ocr_images:
-                    ocr_llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.1)
+                    ocr_llm = ChatGoogleGenerativeAI(model=GEMINI_MODEL, temperature=0.1)
                     
                     batch_size = 15
                     for start_idx in range(0, len(ocr_images), batch_size):

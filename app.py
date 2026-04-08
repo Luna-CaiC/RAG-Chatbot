@@ -5,6 +5,7 @@ Upload PDFs → ask questions → get citation-backed answers powered by
 local HuggingFace embeddings and Google Gemini.
 """
 
+import os
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -17,8 +18,8 @@ from langchain_core.output_parsers import CommaSeparatedListOutputParser
 from src.ingest import process_documents
 from src.history import ChatHistoryManager
 
-# ── Load environment variables ───────────────────────────────────────
 load_dotenv()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 # ── Page configuration ───────────────────────────────────────────────
 st.set_page_config(
@@ -122,7 +123,7 @@ with st.sidebar:
 
 # ── LLM & chain setup ───────────────────────────────────────────────
 LLM = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
+    model=GEMINI_MODEL,
     temperature=0.3,
 )
 
