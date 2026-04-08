@@ -83,7 +83,7 @@ def process_documents(uploaded_files: list) -> Chroma:
                         })
                 
                 if ocr_images:
-                    ocr_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1)
+                    ocr_llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.1)
                     
                     batch_size = 15
                     for start_idx in range(0, len(ocr_images), batch_size):

@@ -1,5 +1,40 @@
 [
   {
+    "id": "6146d753",
+    "timestamp": "2026-04-08T00:34:52.761212",
+    "documents": [
+      "Postgresql_Tutorial.pdf",
+      "slide 18.pdf"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "请总结 slide 18这个文件里的内容。how to create a table using postgresql?"
+      },
+      {
+        "role": "assistant",
+        "content": "❌ Error generating response: Error calling model 'gemini-1.5-flash' (NOT_FOUND): 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}"
+      }
+    ]
+  },
+  {
+    "id": "161da746",
+    "timestamp": "2026-04-08T00:09:50.929878",
+    "documents": [
+      "Postgresql_Tutorial.pdf",
+      "slide 18.pdf"
+    ],
+    "messages": []
+  },
+  {
+    "id": "1e7a00f1",
+    "timestamp": "2026-04-08T00:09:26.696243",
+    "documents": [
+      "Postgresql_Tutorial.pdf"
+    ],
+    "messages": []
+  },
+  {
     "id": "6fa47cc1",
     "timestamp": "2026-03-24T01:54:28.472431",
     "documents": [
