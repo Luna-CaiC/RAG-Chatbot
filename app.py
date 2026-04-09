@@ -6,6 +6,8 @@ local HuggingFace embeddings and Google Gemini.
 """
 
 import os
+import re
+import time
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -18,7 +20,7 @@ from langchain_core.output_parsers import CommaSeparatedListOutputParser
 from src.ingest import process_documents
 from src.history import ChatHistoryManager
 
-load_dotenv()
+load_dotenv(override=True)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 # ── Page configuration ───────────────────────────────────────────────
@@ -190,29 +192,36 @@ if user_query:
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
+                # ── MMR Retriever: forces source diversity ──────────────
+                # MMR fetches 30 candidates then picks the 12 most RELEVANT
+                # AND DIVERSE — prevents one large doc (e.g. PostgreSQL)
+                # from flooding all retrieval slots when multiple docs exist.
+                num_docs = len(st.session_state.doc_names)
                 retriever = st.session_state.vector_store.as_retriever(
-                    search_kwargs={"k": 8}
+                    search_type="mmr",
+                    search_kwargs={
+                        "k": max(8, num_docs * 6),   # 6 chunks per doc minimum
+                        "fetch_k": max(30, num_docs * 20),  # wider candidate pool
+                        "lambda_mult": 0.65,          # 0=max diversity, 1=max relevance
+                    }
                 )
+                # ── Rule-based Query Decomposition (no API call) ─────────
+                # Splits compound questions on '?', '。', 'and', etc.
+                def decompose_query(q: str) -> list[str]:
+                    parts = re.split(r'[?？。]|\band\b|\bAND\b', q)
+                    parts = [p.strip() for p in parts if len(p.strip()) > 5]
+                    return parts if parts else [q]
 
-                # ── Advanced RAG: Query Decomposition ──────────────────────
-                # Break complex user queries into simpler sub-queries to ensure all 
-                # parts of a compound question (e.g., across multiple docs) are retrieved.
-                decomp_prompt = PromptTemplate(
-                    template="Break this complex query into up to 3 concise, distinct search queries for a vector database. Return them ONLY as a comma-separated list.\nQuery: {query}",
-                    input_variables=["query"]
-                )
-                decomp_chain = decomp_prompt | LLM | CommaSeparatedListOutputParser()
-                sub_queries = decomp_chain.invoke({"query": user_query})
-                # Always safely include the original query
-                all_queries = [user_query] + sub_queries
+                sub_queries = decompose_query(user_query)
+                all_queries = list(dict.fromkeys([user_query] + sub_queries))
 
-                # Gather and deduplicate documents from all queries
+                # Gather and deduplicate documents from all sub-queries
                 all_docs = []
                 for q in all_queries:
                     all_docs.extend(retriever.invoke(q))
-                
+
                 unique_docs = list({doc.page_content: doc for doc in all_docs}.values())
-                # ───────────────────────────────────────────────────────────
+                # ─────────────────────────────────────────────────────────
 
                 # Format each chunk so the LLM explicitly sees the source filename
                 document_prompt = PromptTemplate.from_template(
