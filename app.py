@@ -50,10 +50,10 @@ with st.sidebar:
     # ── Upload section ───────────────────────────────────────────────
     st.header("📄 Upload Documents")
     uploaded_files = st.file_uploader(
-        "Choose one or more PDF files",
-        type=["pdf"],
+        "Choose one or more files (PDF, Word, or Image)",
+        type=["pdf", "docx", "jpg", "jpeg", "png", "webp", "gif"],
         accept_multiple_files=True,
-        help="Upload technical documents or research papers to query.",
+        help="Supported: PDF, Word (.docx), Images (.jpg, .jpeg, .png, .webp, .gif)",
     )
 
     if uploaded_files:
