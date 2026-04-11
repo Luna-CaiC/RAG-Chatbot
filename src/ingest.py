@@ -208,15 +208,23 @@ def _extract_image_pages(file_bytes: bytes, filename: str, llm: ChatGoogleGenera
 
 # ── Main entry point ─────────────────────────────────────────────────
 
-def process_documents(uploaded_files: list) -> Chroma:
+def process_documents(
+    uploaded_files: list,
+    persist_directory: str | None = None,
+    embeddings=None,
+) -> Chroma:
     """
-    Process multiple uploaded files (PDF / Word / Image) into a combined vector store.
+    Process multiple uploaded files (PDF / Word / Image) into a Chroma vector store.
 
     Args:
-        uploaded_files: List of Streamlit UploadedFile objects.
+        uploaded_files:    List of file objects (UploadedFile or FileWrapper).
+        persist_directory: Optional path to persist the Chroma DB to disk.
+                           Pass a per-session path for fast future resumption.
+        embeddings:        Optional pre-built HuggingFaceEmbeddings instance
+                           (use a cached one from app.py to save load time).
 
     Returns:
-        Chroma: A freshly created, session-isolated vector store.
+        Chroma: The populated vector store.
     """
     if not uploaded_files:
         raise ValueError("No files were uploaded.")
@@ -285,16 +293,20 @@ def process_documents(uploaded_files: list) -> Chroma:
         raise RuntimeError("No text could be extracted from any of the uploaded files. "
                            "The file may be empty, password-protected, or use an unsupported format.")
 
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    if embeddings is None:
+        embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
-    # ── Unique collection per session — prevents cross-session contamination ──
-    collection_name = f"rag_session_{uuid.uuid4().hex[:12]}"
+    # ── One fixed collection per session dir (isolation via directory) ──
+    collection_name = "main"
     vector_store = Chroma.from_documents(
         documents=all_chunks,
         embedding=embeddings,
         collection_name=collection_name,
+        persist_directory=persist_directory,   # None = ephemeral in-memory
     )
 
-    logger.info("Vector store '%s' created: %d vectors from %d file(s).",
-                collection_name, len(all_chunks), len(uploaded_files))
+    logger.info(
+        "Vector store created (%s): %d vectors from %d file(s). persist=%s",
+        collection_name, len(all_chunks), len(uploaded_files), persist_directory,
+    )
     return vector_store

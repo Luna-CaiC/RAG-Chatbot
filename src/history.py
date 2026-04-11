@@ -1,16 +1,18 @@
 """
 src/history.py — Persistent Chat History Manager
 ==================================================
-Saves and loads chat sessions to/from a local JSON file
-so conversations survive page refreshes.
+Saves and loads chat sessions to/from a local JSON file.
+Also manages per-session file storage so sessions can be resumed.
 """
 
 import json
 import os
+import shutil
 import uuid
 from datetime import datetime
 
-HISTORY_FILE = os.path.join("data", "chat_sessions.json")
+HISTORY_FILE  = os.path.join("data", "chat_sessions.json")
+FILES_BASE_DIR = os.path.join("data", "session_files")
 
 
 class ChatHistoryManager:
@@ -39,9 +41,10 @@ class ChatHistoryManager:
         with open(self.filepath, "w", encoding="utf-8") as f:
             json.dump(sessions, f, ensure_ascii=False, indent=2)
 
-    def create_session(self, doc_names: list[str]) -> str:
-        """Create a new session and return its ID."""
-        session_id = uuid.uuid4().hex[:8]
+    # ── Session CRUD ──────────────────────────────────────────────────
+
+    def create_session(self, session_id: str, doc_names: list[str]) -> str:
+        """Create a new session with a provided ID and return it."""
         sessions = self._read()
         sessions.insert(0, {
             "id": session_id,
@@ -49,8 +52,7 @@ class ChatHistoryManager:
             "documents": doc_names,
             "messages": [],
         })
-        # Keep only the latest 50 sessions
-        self._write(sessions[:50])
+        self._write(sessions[:50])  # Keep latest 50
         return session_id
 
     def save_messages(self, session_id: str, messages: list[dict]):
@@ -84,7 +86,46 @@ class ChatHistoryManager:
         return None
 
     def delete_session(self, session_id: str):
-        """Remove a session by ID."""
+        """Remove a session from the list AND delete its stored files and vectors."""
+        # Remove from JSON
         sessions = self._read()
         sessions = [s for s in sessions if s["id"] != session_id]
         self._write(sessions)
+        # Delete stored raw files
+        self.delete_session_files(session_id)
+        # Delete persisted Chroma vector store
+        vector_dir = os.path.join("data", "session_vectors", session_id)
+        if os.path.exists(vector_dir):
+            shutil.rmtree(vector_dir)
+
+    # ── Session file storage ──────────────────────────────────────────
+
+    def save_session_files(self, session_id: str, file_data: list[tuple[str, bytes]]):
+        """
+        Persist uploaded file bytes to disk so the session can be resumed later.
+        Args:
+            session_id: The session identifier.
+            file_data: List of (filename, bytes) tuples.
+        """
+        session_dir = os.path.join(FILES_BASE_DIR, session_id)
+        os.makedirs(session_dir, exist_ok=True)
+        for name, data in file_data:
+            # Sanitize filename to avoid path traversal issues
+            safe_name = os.path.basename(name).replace("/", "_")
+            with open(os.path.join(session_dir, safe_name), "wb") as f:
+                f.write(data)
+
+    def get_session_files_dir(self, session_id: str) -> str:
+        """Return the directory where session files are stored."""
+        return os.path.join(FILES_BASE_DIR, session_id)
+
+    def session_has_stored_files(self, session_id: str) -> bool:
+        """Return True if the session has stored files on disk."""
+        d = self.get_session_files_dir(session_id)
+        return os.path.isdir(d) and bool(os.listdir(d))
+
+    def delete_session_files(self, session_id: str):
+        """Delete all stored files for a session."""
+        session_dir = self.get_session_files_dir(session_id)
+        if os.path.exists(session_dir):
+            shutil.rmtree(session_dir)

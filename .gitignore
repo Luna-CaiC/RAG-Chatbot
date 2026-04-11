@@ -27,6 +27,9 @@ Thumbs.db
 
 # ChromaDB persistent storage
 chroma_db/
+data/session_vectors/
+data/session_files/
+data/chat_sessions.json
 
 # Data files (optional — uncomment if you don't want to track uploaded PDFs)
-# data/*.pdf
+data/*.pdf

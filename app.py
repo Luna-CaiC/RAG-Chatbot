@@ -7,21 +7,27 @@ local HuggingFace embeddings and Google Gemini.
 
 import os
 import re
-import time
+import uuid
+import shutil
 import streamlit as st
 from dotenv import load_dotenv
 
+from langchain_groq import ChatGroq
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.output_parsers import CommaSeparatedListOutputParser
+from langchain_community.vectorstores import Chroma
 
 from src.ingest import process_documents
 from src.history import ChatHistoryManager
 
 load_dotenv(override=True)
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL    = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GROQ_MODEL      = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+VECTORS_BASE    = os.path.join("data", "session_vectors")
 
 # ── Page configuration ───────────────────────────────────────────────
 st.set_page_config(
@@ -30,102 +36,85 @@ st.set_page_config(
     layout="centered",
 )
 
+
+# ── Cache the embedding model (loads once per server session) ─────────
+@st.cache_resource(show_spinner="Loading embedding model (first time only)…")
+def get_embeddings():
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+
+
 # ── Persistent history manager ───────────────────────────────────────
 history_mgr = ChatHistoryManager()
 
+
+# ── FileWrapper: mimics Streamlit UploadedFile for on-disk files ─────
+class FileWrapper:
+    def __init__(self, name: str, content: bytes):
+        self.name     = name
+        self._content = content
+        self.file_id  = f"disk_{name}"
+
+    def read(self) -> bytes:
+        return self._content
+
+
 # ── Session state defaults ───────────────────────────────────────────
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "vector_store" not in st.session_state:
-    st.session_state.vector_store = None
-if "session_id" not in st.session_state:
-    st.session_state.session_id = None
-if "doc_names" not in st.session_state:
-    st.session_state.doc_names = []
-if "viewing_history" not in st.session_state:
-    st.session_state.viewing_history = False
+for key, default in {
+    "chat_history":    [],
+    "vector_store":    None,
+    "session_id":      None,
+    "doc_names":       [],
+    "viewing_history": False,
+    "pending_resume":  None,
+    "last_file_ids":   None,
+    "resume_no_create": False,
+    "uploader_key":    0,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
-# ── Sidebar ──────────────────────────────────────────────────────────
-with st.sidebar:
-    # ── Upload section ───────────────────────────────────────────────
-    st.header("📄 Upload Documents")
-    uploaded_files = st.file_uploader(
-        "Choose one or more files (PDF, Word, or Image)",
-        type=["pdf", "docx", "jpg", "jpeg", "png", "webp", "gif"],
-        accept_multiple_files=True,
-        help="Supported: PDF, Word (.docx), Images (.jpg, .jpeg, .png, .webp, .gif)",
-    )
 
-    if uploaded_files:
-        # Build a fingerprint from all file IDs to detect changes
-        current_ids = tuple(sorted(f.file_id for f in uploaded_files))
-        previous_ids = st.session_state.get("last_file_ids", None)
+# ── Handle pending session resume (runs before sidebar) ──────────────
+# FAST PATH: session_vectors/{id}/ exists → load Chroma from disk (seconds)
+# READ-ONLY: no vectors → show history only, user can re-upload to resume
+if st.session_state.pending_resume is not None:
+    resume_id = st.session_state.pending_resume
+    st.session_state.pending_resume = None  # Clear to avoid loops
 
-        if current_ids != previous_ids:
-            with st.spinner("Processing documents..."):
-                try:
-                    # Clear old state
-                    st.session_state.vector_store = None
-                    st.session_state.chat_history = []
-                    st.session_state.viewing_history = False
+    vector_dir = os.path.join(VECTORS_BASE, resume_id)
 
-                    vector_store = process_documents(uploaded_files)
-                    doc_names = [f.name for f in uploaded_files]
-
-                    st.session_state.vector_store = vector_store
-                    st.session_state.last_file_ids = current_ids
-                    st.session_state.doc_names = doc_names
-
-                    # Create a new persistent session
-                    session_id = history_mgr.create_session(doc_names)
-                    st.session_state.session_id = session_id
-
-                    st.success(f"✅ {len(doc_names)} file(s) processed!")
-                except Exception as e:
-                    st.error(f"❌ Error: {e}")
-
-    if st.session_state.vector_store is not None:
-        names = ", ".join(st.session_state.doc_names)
-        st.info(f"📚 Active: **{names}**")
-
-    st.divider()
-
-    # ── Clear chat button ────────────────────────────────────────────
-    if st.button("🗑️ Clear Chat History", use_container_width=True):
-        st.session_state.chat_history = []
-        st.session_state.viewing_history = False
-        if st.session_state.session_id:
-            history_mgr.save_messages(st.session_state.session_id, [])
-        st.rerun()
-
-    st.divider()
-
-    # ── Past sessions ────────────────────────────────────────────────
-    st.header("📜 Past Sessions")
-    sessions = history_mgr.load_sessions()
-
-    if not sessions:
-        st.caption("No saved sessions yet.")
+    if os.path.exists(vector_dir):
+        # Fast path: load persisted Chroma — takes seconds, no re-embedding
+        with st.spinner("🔄 Restoring session…"):
+            try:
+                embeddings = get_embeddings()
+                vs = Chroma(
+                    persist_directory=vector_dir,
+                    embedding_function=embeddings,
+                    collection_name="main",
+                )
+                st.session_state.vector_store    = vs
+                st.session_state.viewing_history = False
+                st.session_state.resume_no_create = True
+            except Exception as e:
+                st.warning(f"⚠️ Could not load session vectors: {e}")
+                st.session_state.viewing_history = True
+                st.session_state.vector_store    = None
     else:
-        for s in sessions[:10]:  # Show latest 10
-            docs_label = ", ".join(s["documents"]) or "Unknown"
-            ts = s["timestamp"][:16].replace("T", " ")  # "2026-03-24 00:37"
-            msg_count = s["message_count"]
-            label = f"📝 {docs_label} ({msg_count} msgs)\n{ts}"
+        # No persisted vectors — instant read-only mode.
+        # (Sessions before vector-persistence feature fall here.)
+        st.session_state.viewing_history = True
+        st.session_state.vector_store    = None
 
-            if st.button(label, key=f"hist_{s['id']}", use_container_width=True):
-                full_session = history_mgr.get_session(s["id"])
-                if full_session:
-                    st.session_state.chat_history = full_session["messages"]
-                    st.session_state.doc_names = full_session["documents"]
-                    st.session_state.viewing_history = True
-                    st.session_state.vector_store = None  # Vectors not available
-                    st.session_state.session_id = s["id"]
-                    st.rerun()
+    st.rerun()
 
-# ── LLM & chain setup ───────────────────────────────────────────────
-LLM = ChatGoogleGenerativeAI(
-    model=GEMINI_MODEL,
+
+# ── LLM: Groq for chat, Gemini kept in ingest.py for OCR only ────────
+# Groq free tier: no daily limit, fast (500+ tokens/s)
+# Gemini free tier: 1500 RPD but shared with OCR → move chat to Groq
+LLM = ChatGroq(
+    model=GROQ_MODEL,
     temperature=0.4,
 )
 
@@ -144,18 +133,15 @@ SYSTEM_PROMPT = (
     "   - Describe the overall nature and scope of the document.\n"
     "   - Use phrases like 'for example', 'including but not limited to', "
     "'among other topics' — NOT 'it includes: [list]' which implies completeness.\n"
-    "   - If the document clearly covers many topics (many questions, sections, etc.), "
-    "explicitly say so: e.g. 'This document contains a large collection of ... '.\n"
-    "   - Give a rich, multi-paragraph answer — not just a short bullet list.\n"
-    "3. For SPECIFIC questions, provide a complete and detailed answer using "
-    "the retrieved context. Do NOT say 'the document does not provide' when "
-    "the context clearly contains the information.\n"
-    "4. Only say 'I cannot answer this based on the provided documents' if the "
-    "context truly has NO relevant information at all.\n"
-    "5. Do NOT use outside knowledge that contradicts the documents.\n"
+    "   - If the document clearly covers many topics, explicitly say so.\n"
+    "   - Give a rich, multi-paragraph answer.\n"
+    "3. For SPECIFIC questions, provide a complete and detailed answer ONLY using the provided context.\n"
+    "4. If the provided context does NOT contain the answer to a specific question, you MUST "
+    "explicitly state: 'I cannot answer this based on the provided documents.' Do NOT guess, "
+    "and do NOT use your general knowledge to answer.\n"
+    "5. Do NOT use any outside knowledge whatsoever. You are strictly restricted to the documents.\n"
     "6. Cite page numbers and source filenames when available.\n"
-    "7. When the user refers to a document by filename (e.g. 'slide 18'), "
-    "understand they mean the uploaded file and answer about its content.\n\n"
+    "7. When the user refers to a document by filename, answer about its content.\n\n"
     "Context:\n{context}"
 )
 
@@ -164,107 +150,228 @@ PROMPT = ChatPromptTemplate.from_messages([
     ("human", "{input}"),
 ])
 
-# ── Main chat interface ─────────────────────────────────────────────
+
+# ────────────────────────────────────────────────────────────────────
+# SIDEBAR
+# ────────────────────────────────────────────────────────────────────
+with st.sidebar:
+
+    # ── ✏️ New Chat button ───────────────────────────────────────────
+    if st.button("✏️  New Chat", use_container_width=True, type="primary"):
+        st.session_state.chat_history     = []
+        st.session_state.vector_store     = None
+        st.session_state.session_id       = None
+        st.session_state.doc_names        = []
+        st.session_state.viewing_history  = False
+        st.session_state.last_file_ids    = None
+        st.session_state.resume_no_create = False
+        st.session_state.uploader_key    += 1   # clears the file uploader widget
+        st.rerun()
+
+    st.divider()
+
+    # ── Upload section ───────────────────────────────────────────────
+    st.header("📄 Upload Documents")
+    uploaded_files = st.file_uploader(
+        "Choose one or more files (PDF, Word, or Image)",
+        type=["pdf", "docx", "jpg", "jpeg", "png", "webp", "gif"],
+        accept_multiple_files=True,
+        help="Supported: PDF, Word (.docx), Images (.jpg, .jpeg, .png, .webp, .gif)",
+        key=f"uploader_{st.session_state.uploader_key}",
+    )
+
+    if uploaded_files:
+        current_ids  = tuple(sorted(f.file_id for f in uploaded_files))
+        previous_ids = st.session_state.last_file_ids
+
+        if current_ids != previous_ids:
+            if st.session_state.resume_no_create:
+                # After resume: uploader still shows old files — sync IDs only
+                st.session_state.last_file_ids    = current_ids
+                st.session_state.resume_no_create  = False
+            else:
+                with st.spinner("Processing documents…"):
+                    try:
+                        # Read all bytes before any stream is consumed
+                        file_data = [(f.name, f.read()) for f in uploaded_files]
+
+                        st.session_state.vector_store    = None
+                        st.session_state.chat_history    = []
+                        st.session_state.viewing_history = False
+
+                        session_id  = uuid.uuid4().hex[:8]
+                        persist_dir = os.path.join(VECTORS_BASE, session_id)
+                        embeddings  = get_embeddings()
+                        wrappers    = [FileWrapper(n, d) for n, d in file_data]
+
+                        vector_store = process_documents(
+                            wrappers,
+                            persist_directory=persist_dir,
+                            embeddings=embeddings,
+                        )
+                        doc_names = [name for name, _ in file_data]
+
+                        st.session_state.vector_store  = vector_store
+                        st.session_state.last_file_ids = current_ids
+                        st.session_state.doc_names     = doc_names
+                        st.session_state.session_id    = session_id
+
+                        history_mgr.create_session(session_id, doc_names)
+                        history_mgr.save_session_files(session_id, file_data)
+
+                        st.success(f"✅ {len(doc_names)} file(s) processed!")
+                    except Exception as e:
+                        st.error(f"❌ Error: {e}")
+
+    if st.session_state.vector_store is not None:
+        names = ", ".join(st.session_state.doc_names)
+        st.info(f"📚 Active: **{names}**")
+
+    st.divider()
+
+    # ── Clear chat button ────────────────────────────────────────────
+    if st.button("🗑️ Clear Chat History", use_container_width=True):
+        if st.session_state.session_id:
+            history_mgr.delete_session(st.session_state.session_id)
+
+        st.session_state.chat_history     = []
+        st.session_state.viewing_history  = False
+        st.session_state.vector_store     = None
+        st.session_state.session_id       = None
+        st.session_state.doc_names        = []
+        st.session_state.last_file_ids    = None
+        st.session_state.resume_no_create = False
+        st.rerun()
+
+    st.divider()
+
+    # ── Past sessions list ───────────────────────────────────────────
+    st.header("📜 Past Sessions")
+    sessions  = history_mgr.load_sessions()
+    active_id = st.session_state.session_id
+
+    if not sessions:
+        st.caption("No saved sessions yet.")
+    else:
+        for s in sessions[:20]:
+            docs_label = ", ".join(s["documents"]) or "Unknown"
+            ts         = s["timestamp"][:16].replace("T", " ")
+            msg_count  = s["message_count"]
+            label      = f"📝 {docs_label} ({msg_count} msgs)\n{ts}"
+            btn_type   = "primary" if s["id"] == active_id else "secondary"
+
+            if st.button(label, key=f"hist_{s['id']}",
+                         use_container_width=True, type=btn_type):
+                full_session = history_mgr.get_session(s["id"])
+                if full_session:
+                    st.session_state.chat_history = full_session["messages"]
+                    st.session_state.doc_names    = full_session["documents"]
+                    st.session_state.session_id   = s["id"]
+                    st.session_state.pending_resume  = s["id"]
+                    st.session_state.vector_store    = None
+                    st.session_state.viewing_history = False
+                    st.rerun()
+
+
+# ────────────────────────────────────────────────────────────────────
+# MAIN CHAT INTERFACE
+# ────────────────────────────────────────────────────────────────────
 st.title("🤖 RAG Chatbot")
 st.markdown(
-    "**AI-powered document assistant** — Upload PDFs in the sidebar, "
+    "**AI-powered document assistant** — Upload files in the sidebar, "
     "then ask questions. Answers are grounded in your documents with "
     "source citations. _Powered by HuggingFace Embeddings & Google Gemini._"
 )
 
-# Show banner when viewing a past session
+# Read-only banner
 if st.session_state.viewing_history:
     st.warning(
-        "📜 Viewing a past session. To ask new questions, "
-        "upload the PDF(s) again in the sidebar."
+        "📜 This is a read-only view of a past session "
+        "(documents not available for this session). "
+        "Upload files in the sidebar to continue chatting."
     )
 
-# Display existing chat history
+# Render chat history
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat input — disabled when no vector store (including history-only mode)
-user_query = st.chat_input(
-    "Ask a question about your document(s)...",
-    disabled=st.session_state.vector_store is None,
-)
+# Chat input — ALWAYS enabled (no disabled state)
+user_query = st.chat_input("Ask a question about your document(s)…")
 
 if user_query:
-    # Exit history-viewing mode when asking new questions
     st.session_state.viewing_history = False
 
-    # Show user message
     with st.chat_message("user"):
         st.markdown(user_query)
     st.session_state.chat_history.append({"role": "user", "content": user_query})
 
-    # Generate AI response
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                # ── MMR Retriever: forces source diversity ──────────────
-                # MMR fetches 30 candidates then picks the 12 most RELEVANT
-                # AND DIVERSE — prevents one large doc (e.g. PostgreSQL)
-                # from flooding all retrieval slots when multiple docs exist.
-                num_docs = len(st.session_state.doc_names)
-                retriever = st.session_state.vector_store.as_retriever(
-                    search_type="mmr",
-                    search_kwargs={
-                        "k": max(8, num_docs * 6),   # 6 chunks per doc minimum
-                        "fetch_k": max(30, num_docs * 20),  # wider candidate pool
-                        "lambda_mult": 0.65,          # 0=max diversity, 1=max relevance
-                    }
-                )
-                # ── Rule-based Query Decomposition (no API call) ─────────
-                # Splits compound questions on '?', '。', 'and', etc.
-                def decompose_query(q: str) -> list[str]:
-                    parts = re.split(r'[?？。]|\band\b|\bAND\b', q)
-                    parts = [p.strip() for p in parts if len(p.strip()) > 5]
-                    return parts if parts else [q]
+        if st.session_state.vector_store is None:
+            # No documents uploaded yet — friendly prompt
+            msg = (
+                "📂 No documents loaded. "
+                "Please upload a file in the sidebar first, "
+                "then ask your question."
+            )
+            st.info(msg)
+            st.session_state.chat_history.append({"role": "assistant", "content": msg})
+        else:
+            with st.spinner("Thinking…"):
+                try:
+                    # ── MMR Retriever ────────────────────────────────────
+                    num_docs  = len(st.session_state.doc_names)
+                    retriever = st.session_state.vector_store.as_retriever(
+                        search_type="mmr",
+                        search_kwargs={
+                            "k":           max(8, num_docs * 6),
+                            "fetch_k":     max(30, num_docs * 20),
+                            "lambda_mult": 0.65,
+                        },
+                    )
 
-                sub_queries = decompose_query(user_query)
-                all_queries = list(dict.fromkeys([user_query] + sub_queries))
+                    # ── Rule-based query decomposition ───────────────────
+                    def decompose_query(q: str) -> list[str]:
+                        parts = re.split(r'[?？。]|\band\b|\bAND\b', q)
+                        parts = [p.strip() for p in parts if len(p.strip()) > 5]
+                        return parts if parts else [q]
 
-                # Gather and deduplicate documents from all sub-queries
-                all_docs = []
-                for q in all_queries:
-                    all_docs.extend(retriever.invoke(q))
+                    sub_queries = decompose_query(user_query)
+                    all_queries = list(dict.fromkeys([user_query] + sub_queries))
 
-                unique_docs = list({doc.page_content: doc for doc in all_docs}.values())
-                # ─────────────────────────────────────────────────────────
+                    all_docs = []
+                    for q in all_queries:
+                        all_docs.extend(retriever.invoke(q))
+                    unique_docs = list(
+                        {doc.page_content: doc for doc in all_docs}.values()
+                    )
 
-                # Format each chunk so the LLM explicitly sees the source filename
-                document_prompt = PromptTemplate.from_template(
-                    "Source: {source}\nContent: {page_content}"
-                )
-                document_chain = create_stuff_documents_chain(
-                    LLM, PROMPT, document_prompt=document_prompt
-                )
+                    # ── Chain ────────────────────────────────────────────
+                    document_prompt = PromptTemplate.from_template(
+                        "Source: {source}\nContent: {page_content}"
+                    )
+                    document_chain = create_stuff_documents_chain(
+                        LLM, PROMPT, document_prompt=document_prompt
+                    )
+                    doc_names_str = ", ".join(st.session_state.doc_names) or "Unknown"
+                    answer = document_chain.invoke({
+                        "input":     user_query,
+                        "doc_names": doc_names_str,
+                        "context":   unique_docs,
+                    })
 
-                # Pass doc_names into the chain so the prompt knows which files are active
-                doc_names_str = ", ".join(st.session_state.doc_names) or "Unknown"
-                
-                # Execute the chain directly with our globally retrieved unique docs
-                response = document_chain.invoke({
-                    "input": user_query,
-                    "doc_names": doc_names_str,
-                    "context": unique_docs,
-                })
-                answer = response
+                    st.markdown(answer)
+                    st.session_state.chat_history.append(
+                        {"role": "assistant", "content": answer}
+                    )
+                except Exception as e:
+                    err = f"❌ Error generating response: {e}"
+                    st.error(err)
+                    st.session_state.chat_history.append(
+                        {"role": "assistant", "content": err}
+                    )
 
-                st.markdown(answer)
-                st.session_state.chat_history.append(
-                    {"role": "assistant", "content": answer}
-                )
-            except Exception as e:
-                error_msg = f"❌ Error generating response: {e}"
-                st.error(error_msg)
-                st.session_state.chat_history.append(
-                    {"role": "assistant", "content": error_msg}
-                )
-
-    # Auto-save conversation to persistent history
+    # Auto-save
     if st.session_state.session_id:
         history_mgr.save_messages(
             st.session_state.session_id,
